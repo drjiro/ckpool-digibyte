@@ -10,6 +10,8 @@
 
 #include "ckdb.h"
 
+ckpool_t *global_ckp;
+
 /* This code's lock implementation is equivalent to table level locking
  * Consider adding row level locking (a per kitem usage count) if needed
  */

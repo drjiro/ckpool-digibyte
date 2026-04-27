@@ -6532,13 +6532,18 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	 * copy the json item for id_val as is for the response. By far the
 	 * most common messages will be shares so look for those first */
 	method = json_string_value(method_val);
-	if (likely(cmdmatch(method, "mining.submit") && client->authorised)) {
-		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val);
-
-		ckmsgq_add(sdata->sshareq, jp);
-		return;
-	}
-
+        /* Allow mining.configure before subscribe for version rolling ASICs */
+        if (cmdmatch(method, "mining.configure")) {
+                json_t *val = json_object();
+                json_t *result = json_object();
+                json_object_set_new_nocheck(result, "version-rolling", json_true());
+                json_object_set_new_nocheck(result, "version-rolling.mask", json_string("1fffe000"));
+                json_object_set_new_nocheck(val, "id", json_copy(id_val));
+                json_object_set_new_nocheck(val, "result", result);
+                json_object_set_new_nocheck(val, "error", json_null());
+                stratum_add_send(sdata, val, client_id, SM_SUBSCRIBERESULT);
+                return;
+        }
 	if (cmdmatch(method, "mining.term")) {
 		LOGDEBUG("Mining terminate requested from %s %s", client->identity, client->address);
 		drop_client(ckp, sdata, client_id);
@@ -6629,6 +6634,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 
 	/* We shouldn't really allow unsubscribed users to authorise first but
 	 * some broken stratum implementations do that and we can handle it. */
+
 	if (cmdmatch(method, "mining.auth")) {
 		json_params_t *jp;
 
@@ -6670,7 +6676,12 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		ckmsgq_add(sdata->stxnq, jp);
 		return;
 	}
-
+  
+  if (cmdmatch(method, "mining.submit")) {
+    json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val);
+    ckmsgq_add(sdata->sshareq, jp);
+    return;
+  }
 	/* Unhandled message here */
 	LOGINFO("Unhandled client %s %s method %s", client->identity, client->address, method);
 	return;
