@@ -97,7 +97,7 @@ static const char *gbt_req = "{\"method\": \"getblocktemplate\", \"params\": [{\
 /* Request getblocktemplate from bitcoind already connected with a connsock_t
  * and then summarise the information to the most efficient set of data
  * required to assemble a mining template, storing it in a gbtbase_t structure */
-bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
+bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt, bool *skipped)
 {
 	json_t *rules_array, *coinbase_aux, *res_val, *val;
 	const char *previousblockhash;
@@ -112,6 +112,9 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	int height;
 	int i;
 	bool ret = false;
+
+	if (skipped)
+		*skipped = false;
 
 	val = json_rpc_call(cs, gbt_req);
 	if (!val) {
@@ -154,14 +157,30 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 		goto out;
 	}
 
+	/* Set prevhash before the algo-skip so callers can update lastswaphash
+	 * even for non-SHA256d blocks on DGB (to suppress blockupdate spam). */
+	hex2bin(hash_swap, previousblockhash, 32);
+	swap_256(tmp, hash_swap);
+	__bin2hex(gbt->prevhash, tmp, 32);
+
+	/* DGB: skip non-SHA256d blocks (pow_algo_id != 0) */
+	{
+		json_t *pow_algo_id_val = json_object_get(res_val, "pow_algo_id");
+		if (pow_algo_id_val) {
+			int pow_algo_id = json_integer_value(pow_algo_id_val);
+			if (pow_algo_id != 0) {
+				LOGDEBUG("Skipping GBT with pow_algo_id=%d (not SHA-256d)", pow_algo_id);
+				if (skipped)
+					*skipped = true;
+				goto out;
+			}
+		}
+	}
+
 	/* Store getblocktemplate for remainder of json components as is */
 	json_incref(res_val);
 	json_object_del(val, "result");
 	gbt->json = res_val;
-
-	hex2bin(hash_swap, previousblockhash, 32);
-	swap_256(tmp, hash_swap);
-	__bin2hex(gbt->prevhash, tmp, 32);
 
 	strncpy(gbt->target, target, 65);
 

@@ -431,6 +431,10 @@ struct stratifier_data {
 	int session_id;
 	char lasthash[68];
 	char lastswaphash[68];
+	/* Last best-block hash seen by blockupdate thread (any pow algo).
+	 * Used purely to suppress repeated GEN_PRIORITY triggers for the same
+	 * block; updated by blockupdate, never by add_base(). */
+	char lastseenhash[68];
 
 	ckmsgq_t *updateq;	// Generator base work updates
 	ckmsgq_t *ssends;	// Stratum sends
@@ -1429,6 +1433,19 @@ retry:
 			goto retry;
 		}
 		LOGWARNING("Generator failed in update_base after retrying");
+		goto out;
+	}
+	/* DGB: non-SHA256d block — not a failure, just skip this update.
+	 * Spam suppression is handled by lastseenhash in blockupdate().
+	 * lasthash/lastswaphash are intentionally left unchanged so that
+	 * add_base() can still detect the next SHA256d block correctly. */
+	if (unlikely(wb->skipped)) {
+		LOGDEBUG("Skipping update_base for non-SHA256d block");
+		/* Reset update_time to suppress GEN_NORMAL polling spam. */
+		sdata->update_time = time(NULL);
+		clear_gbtbase(wb);
+		dealloc(wb);
+		ret = true;
 		goto out;
 	}
 	if (unlikely(retries))
@@ -4660,7 +4677,13 @@ static void *blockupdate(void *arg)
 				cksleep_ms(5000);
 				break;
 			case GETBEST_SUCCESS:
-				if (strcmp(hash, sdata->lastswaphash)) {
+				if (strcmp(hash, sdata->lastseenhash)) {
+					/* Record every block hash seen (any algo)
+					 * so we do not re-fire for the same block.
+					 * block_update() filters non-SHA256d blocks
+					 * internally; lastswaphash is managed by
+					 * add_base() for SHA256d blocks only. */
+					strncpy(sdata->lastseenhash, hash, sizeof(sdata->lastseenhash) - 1);
 					update_base(sdata, GEN_PRIORITY);
 					break;
 				}
@@ -4710,8 +4733,9 @@ static bool new_enonce1(ckpool_t *ckp, sdata_t *ckp_sdata, sdata_t *sdata, strat
 		}
 	}
 
-	/* Still initialising */
-	if (unlikely(!sdata->current_workbase))
+	/* Proxy mode requires a workbase to determine enonce lengths.
+	 * In pool mode we can proceed without one (DGB non-SHA256d block). */
+	if (ckp->proxy && unlikely(!sdata->current_workbase))
 		return false;
 
 	/* instance_lock protects enonce1_64. Incrementing a little endian 64bit
@@ -4730,9 +4754,18 @@ static bool new_enonce1(ckpool_t *ckp, sdata_t *ckp_sdata, sdata_t *sdata, strat
 	}
 	ck_wunlock(&ckp_sdata->instance_lock);
 
-	ck_rlock(&sdata->workbase_lock);
-	__fill_enonce1data(sdata->current_workbase, client);
-	ck_runlock(&sdata->workbase_lock);
+	if (sdata->current_workbase) {
+		ck_rlock(&sdata->workbase_lock);
+		__fill_enonce1data(sdata->current_workbase, client);
+		ck_runlock(&sdata->workbase_lock);
+	} else {
+		/* No workbase yet: fill enonce1 using pool config lengths.
+		 * enonce1constlen is 0 in pool mode, varlen = ckp->nonce1length. */
+		int e1varlen = ckp->nonce1length;
+		memcpy(client->enonce1bin, &client->enonce1_64, e1varlen);
+		__bin2hex(client->enonce1var, &client->enonce1_64, e1varlen);
+		__bin2hex(client->enonce1, client->enonce1bin, e1varlen);
+	}
 
 	return true;
 }
@@ -4893,11 +4926,14 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 	}
 
 	sdata = select_sdata(ckp, ckp_sdata, 0);
-	if (unlikely(!ckp->node && (!sdata || !sdata->current_workbase))) {
-		LOGWARNING("Failed to provide subscription due to no %s", sdata ? "current workbase" : "sdata");
+	if (unlikely(!ckp->node && !sdata)) {
+		LOGWARNING("Failed to provide subscription due to no sdata");
 		stratum_send_message(ckp_sdata, client, "Pool Initialising");
 		return json_string("Initialising");
 	}
+	/* DGB: allow subscribe even when current_workbase is NULL (non-SHA256d
+	 * block in progress). The client stays connected; a job is sent when
+	 * the next SHA-256d block arrives via stratum_broadcast_update(). */
 
 	arr_size = json_array_size(params_val);
 	/* NOTE useragent is NULL prior to this so should not be used in code
@@ -4922,9 +4958,11 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 				sprintf(client->enonce1, "%016lx", client->enonce1_64);
 				old_match = true;
 
-				ck_rlock(&ckp_sdata->workbase_lock);
-				__fill_enonce1data(sdata->current_workbase, client);
-				ck_runlock(&ckp_sdata->workbase_lock);
+				if (sdata->current_workbase) {
+					ck_rlock(&ckp_sdata->workbase_lock);
+					__fill_enonce1data(sdata->current_workbase, client);
+					ck_runlock(&ckp_sdata->workbase_lock);
+				}
 			}
 		}
 	} else
@@ -4974,13 +5012,17 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 			client->identity, client->enonce1_64, client->enonce1);
 	}
 
-	/* Workbases will exist if sdata->current_workbase is not NULL */
-	ck_rlock(&sdata->workbase_lock);
-	n2len = sdata->workbases->enonce2varlen;
+	if (sdata->current_workbase) {
+		ck_rlock(&sdata->workbase_lock);
+		n2len = sdata->workbases->enonce2varlen;
+		ck_runlock(&sdata->workbase_lock);
+	} else {
+		/* No workbase yet: use pool config default (DGB non-SHA256d block) */
+		n2len = ckp->nonce2length;
+	}
 	sprintf(sessionid, "%08x", client->session_id);
 	JSON_CPACK(ret, "[[[s,s]],s,i]", "mining.notify", sessionid, client->enonce1,
 			n2len);
-	ck_runlock(&sdata->workbase_lock);
 
 	client->subscribed = true;
 
@@ -7434,11 +7476,21 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	}
 	/* At startup we block until there's a current workbase otherwise we
 	 * will reject miners with the initialising message. A slightly delayed
-	 * response to subscribe is better tolerated. */
-	while (unlikely(!ckp->proxy && !sdata->current_workbase)) {
-		cksleep_ms(100);
-		if (!(++delays % 50))
-			LOGWARNING("%d Second delay waiting for bitcoind at startup", delays / 10);
+	 * response to subscribe is better tolerated.
+	 * DGB: skip the wait for subscribe/authorize/configure so that ASICs
+	 * are not hung for the duration of a non-SHA-256d block (~75s).
+	 * The individual handlers guard against a NULL workbase themselves. */
+	{
+		const char *method_str = json_string_value(method);
+		bool nowait = method_str &&
+			(cmdmatch(method_str, "mining.subscribe") ||
+			 cmdmatch(method_str, "mining.authorize") ||
+			 cmdmatch(method_str, "mining.configure"));
+		while (unlikely(!ckp->proxy && !sdata->current_workbase && !nowait)) {
+			cksleep_ms(100);
+			if (!(++delays % 50))
+				LOGWARNING("%d Second delay waiting for bitcoind at startup", delays / 10);
+		}
 	}
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 }

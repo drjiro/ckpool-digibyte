@@ -195,7 +195,6 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 	char *userpass = NULL;
 	bool ret = false;
 	connsock_t *cs;
-	gbtbase_t gbt;
 	int fd;
 
 	if (si->alive)
@@ -223,15 +222,16 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 		return ret;
 	}
 
-	/* Test we can connect, authorise and get a block template */
-	if (!gen_gbtbase(cs, &gbt)) {
+	/* Test we can connect and authorise. Use getblockcount instead of
+	 * gen_gbtbase so that DGB multi-algo nodes are not rejected when the
+	 * current block happens to be non-SHA256d (pow_algo_id != 0). */
+	if (get_blockcount(cs) < 0) {
 		if (!pinging) {
-			LOGINFO("Failed to get test block template from %s:%s!",
+			LOGINFO("Failed to get block count from %s:%s!",
 				cs->url, cs->port);
 		}
 		goto out;
 	}
-	clear_gbtbase(&gbt);
 	if (!ckp->node && !validate_address(cs, ckp->btcaddress)) {
 		LOGWARNING("Invalid btcaddress: %s !", ckp->btcaddress);
 		goto out;
@@ -399,7 +399,14 @@ retry:
 	buf = umsg->buf;
 	LOGDEBUG("Generator received request: %s", buf);
 	if (cmdmatch(buf, "getbase")) {
-		if (!gen_gbtbase(cs, &gbt)) {
+		bool gbt_skipped = false;
+		if (!gen_gbtbase(cs, &gbt, &gbt_skipped)) {
+			if (gbt_skipped) {
+				LOGDEBUG("Skipping non-SHA256d block template from %s:%s",
+					 cs->url, cs->port);
+				send_unix_msg(umsg->sockd, "Skipped");
+				goto retry;
+			}
 			LOGWARNING("Failed to get block template from %s:%s",
 				   cs->url, cs->port);
 			si->alive = cs->alive = false;
@@ -847,11 +854,19 @@ struct genwork *generator_getbase(ckpool_t *ckp)
 	}
 	cs = &si->cs;
 	gbt = ckzalloc(sizeof(gbtbase_t));
-	if (unlikely(!gen_gbtbase(cs, gbt))) {
-		LOGWARNING("Failed to get block template from %s:%s", cs->url, cs->port);
-		si->alive = cs->alive = false;
-		reconnect_generator(ckp);
-		dealloc(gbt);
+	{
+		bool gbt_skipped = false;
+		if (unlikely(!gen_gbtbase(cs, gbt, &gbt_skipped))) {
+			if (gbt_skipped) {
+				LOGDEBUG("Skipping non-SHA256d block template from %s:%s", cs->url, cs->port);
+				gbt->skipped = true;
+				return gbt;
+			}
+			LOGWARNING("Failed to get block template from %s:%s", cs->url, cs->port);
+			si->alive = cs->alive = false;
+			reconnect_generator(ckp);
+			dealloc(gbt);
+		}
 	}
 out:
 	return gbt;
