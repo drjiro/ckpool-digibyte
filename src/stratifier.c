@@ -1438,11 +1438,12 @@ retry:
 	/* DGB: non-SHA256d block — not a failure, just skip this update.
 	 * Spam suppression is handled by lastseenhash in blockupdate().
 	 * lasthash/lastswaphash are intentionally left unchanged so that
-	 * add_base() can still detect the next SHA256d block correctly. */
+	 * add_base() can still detect the next SHA256d block correctly.
+	 * update_time is also left unchanged so that GEN_NORMAL polling
+	 * fires again after the normal interval and picks up the next
+	 * SHA256d block if blockupdate misses it. */
 	if (unlikely(wb->skipped)) {
 		LOGDEBUG("Skipping update_base for non-SHA256d block");
-		/* Reset update_time to suppress GEN_NORMAL polling spam. */
-		sdata->update_time = time(NULL);
 		clear_gbtbase(wb);
 		dealloc(wb);
 		ret = true;
@@ -4502,6 +4503,12 @@ static void stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 {
 	sdata_t *sdata = ckp->sdata;
 	unix_msg_t *umsg = NULL;
+	/* Track the last time update_base was attempted independently of
+	 * sdata->update_time, which only advances on successful SHA256d blocks.
+	 * During non-SHA256d periods update_time stays frozen, so using it as
+	 * the poll timer would cause update_base to fire on every loop
+	 * iteration rather than once per update_interval. */
+	time_t last_base_check = 0;
 	int ret = 0;
 	char *buf;
 
@@ -4516,15 +4523,17 @@ retry:
 		time_t end_t;
 
 		end_t = time(NULL);
-		if (end_t - sdata->update_time >= ckp->update_interval) {
+		if (end_t - last_base_check >= ckp->update_interval) {
 			if (!ckp->proxy) {
 				LOGDEBUG("%ds elapsed in strat_loop, updating gbt base",
 					 ckp->update_interval);
 				update_base(sdata, GEN_NORMAL);
+				last_base_check = end_t;
 			} else if (!ckp->passthrough) {
 				LOGDEBUG("%ds elapsed in strat_loop, pinging miners",
 					 ckp->update_interval);
 				broadcast_ping(sdata);
+				last_base_check = end_t;
 			}
 		}
 
@@ -7435,7 +7444,6 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 {
 	json_t *val = msg->json_msg, *id_val, *method, *params;
 	int64_t client_id = msg->client_id;
-	int delays = 0;
 
 	if (client->reject == 3) {
 		LOGINFO("Dropping client %s %s tagged for lazy invalidation",
@@ -7474,24 +7482,11 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 		send_json_err(sdata, client_id, id_val, "-1:params not found");
 		return;
 	}
-	/* At startup we block until there's a current workbase otherwise we
-	 * will reject miners with the initialising message. A slightly delayed
-	 * response to subscribe is better tolerated.
-	 * DGB: skip the wait for subscribe/authorize/configure so that ASICs
-	 * are not hung for the duration of a non-SHA-256d block (~75s).
-	 * The individual handlers guard against a NULL workbase themselves. */
-	{
-		const char *method_str = json_string_value(method);
-		bool nowait = method_str &&
-			(cmdmatch(method_str, "mining.subscribe") ||
-			 cmdmatch(method_str, "mining.authorize") ||
-			 cmdmatch(method_str, "mining.configure"));
-		while (unlikely(!ckp->proxy && !sdata->current_workbase && !nowait)) {
-			cksleep_ms(100);
-			if (!(++delays % 50))
-				LOGWARNING("%d Second delay waiting for bitcoind at startup", delays / 10);
-		}
-	}
+	/* DGB: the startup wait loop (originally blocking until current_workbase
+	 * is set) has been removed. During non-SHA256d blocks current_workbase
+	 * is NULL for extended periods; each handler (parse_subscribe,
+	 * parse_authorise, etc.) already guards against a NULL workbase and
+	 * returns an appropriate response immediately. */
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 }
 

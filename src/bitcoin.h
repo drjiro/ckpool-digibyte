@@ -13,7 +13,7 @@
 typedef struct genwork gbtbase_t;
 
 bool validate_address(connsock_t *cs, const char *address);
-bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt);
+bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt, bool *skipped);
 void clear_gbtbase(gbtbase_t *gbt);
 int get_blockcount(connsock_t *cs);
 bool get_blockhash(connsock_t *cs, int height, char *hash);

@@ -83,6 +83,8 @@ struct genwork {
 
 	bool incomplete; /* This is a remote workinfo without all the txn data */
 
+	bool skipped; /* GBT was skipped (e.g. DGB non-SHA256d block) */
+
 	json_t *json; /* getblocktemplate json */
 };
 
