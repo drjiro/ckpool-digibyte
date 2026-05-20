@@ -17,6 +17,7 @@
 #include "stratifier.h"
 
 static const char *b58chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+static const char *bech32chars = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 static char* understood_rules[] = {"segwit", "taproot", "csv"};
 
 static bool check_required_rule(const char* rule)
@@ -44,10 +45,14 @@ bool validate_address(connsock_t *cs, const char *address)
 		return ret;
 	}
 	len = strlen(address);
-	if (len < 27 || len > 36) {
+	/* Legacy/P2SH: 27-34 chars; bech32 (native segwit): up to 90 chars */
+	if (len < 27 || len > 90) {
 		LOGWARNING("Invalid address length %d passed to validate_address", len);
 		return ret;
 	}
+	/* Bech32 addresses contain lowercase chars not in base58 (e.g. '0').
+	 * Detect bech32 by presence of such chars and validate against the
+	 * combined set of base58 + bech32 chars; the node RPC does real validation. */
 	for (i = 0; i < len; i++) {
 		char c = address[i];
 		bool found = false;
@@ -56,6 +61,14 @@ bool validate_address(connsock_t *cs, const char *address)
 			if (c == b58chars[j]) {
 				found = true;
 				break;
+			}
+		}
+		if (!found) {
+			for (j = 0; bech32chars[j]; j++) {
+				if (c == bech32chars[j]) {
+					found = true;
+					break;
+				}
 			}
 		}
 		if (!found) {

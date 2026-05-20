@@ -5376,7 +5376,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	ck_wunlock(&sdata->instance_lock);
 
 	/* Is this a btc address based username? */
-	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 35))
+	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 91))
 		user->btcaddress = generator_checkaddr(ckp, username);
 	if (new_user) {
 		LOGNOTICE("Added new user %s%s", username, user->btcaddress ?
@@ -6854,7 +6854,7 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 	user = get_create_user(sdata, username, &new_user);
 
 	/* Is this a btc address based username? */
-	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 35))
+	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 91))
 		user->btcaddress = generator_checkaddr(ckp, username);
 	if (new_user) {
 		LOGNOTICE("Added new remote user %s%s", username, user->btcaddress ?

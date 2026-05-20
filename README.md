@@ -67,6 +67,12 @@ Fork of [ctubio/ckpool](https://github.com/ctubio/ckpool) with patches for DigiB
 - On DGB, `current_workbase` is NULL during every non-SHA-256d block (~75s intervals), making the wait indefinite
 - The loop has been removed entirely; each handler (`parse_subscribe`, `parse_authorise`, etc.) already guards against a NULL workbase and returns an appropriate response immediately
 
+### 13. Fix bech32 address authentication (`src/bitcoin.c`, `src/stratifier.c`)
+- DGB bech32 addresses (e.g. `dgb1q...`) are 43 characters, exceeding the legacy address length check `len > 26 && len < 35` in `generate_user()`
+- As a result `user->btcaddress` was never set, so ckdb received `ID_AUTH` (username/password) instead of `ID_ADDRAUTH` (address-based registration), causing "failed to authorise" for all bech32 workers
+- Fixed by extending the length upper bound to 91 in `stratifier.c` (both `generate_user` call sites)
+- `validate_address()` in `bitcoin.c` also rejected bech32 addresses via `len > 36` and a base58-only character check; fixed by raising the limit to 90 and adding bech32 character validation before delegating to the node's `validateaddress` RPC
+
 ## Tested environment
 - Ubuntu 22.04 LTS
 - DigiByte Core 8.26.2
